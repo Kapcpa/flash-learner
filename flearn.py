@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 
@@ -16,7 +17,7 @@ You are a precise flashcard generator. Read the provided study materials and ext
 Output ONLY valid JSON in the following exact format:
 {
   "cards": [
-    {"front": "Question or concept?", "back": "Answer or definition."}
+	{"front": "Question or concept?", "back": "Answer or definition."}
   ]
 }
 """
@@ -36,23 +37,64 @@ def get_client() -> Groq:
 	return client
 
 
-def get_text_files(target_dir: Path) -> str:
+def get_file_hash(filepath: Path) -> str:
+	hasher = hashlib.md5()
+	hasher.update(filepath.read_bytes())
+	return hasher.hexdigest()
+
+
+def load_database(database_path: Path) -> dict:
+	if not database_path.exists():
+		return {}
+
+	try:
+		return json.loads(database_path.read_text())
+	except json.JSONDecodeError:
+		print(f"Warning: Database file '{database_path.name}' is corrupted. Starting fresh.")
+		return {}
+
+
+def get_all_cards(data: dict) -> list[dict]:
+	cards_by_file = data.get("cards_by_file", {})
+
+	if cards_by_file:
+		cards = []
+
+		for file_cards in cards_by_file.values():
+			cards.extend(file_cards)
+
+		return cards
+
+	return data.get("cards", [])
+
+
+def get_text_files(target_dir: Path, file_states: dict) -> tuple[str, dict]:
 	content = []
+	new_file_states = file_states.copy()
 
 	for file_path in target_dir.glob("*"):
 		if file_path.suffix.lower() in ['.txt', '.md']:
-			if FLEARN_DEBUG:
-				print(f"Reading file: {file_path.name}")
 			try:
-				text = file_path.read_text(encoding='utf-8')
-				content.append(f"--- Document: {file_path.name} ---\n{text}\n")
+				current_hash = get_file_hash(file_path)
+				filename = file_path.name
+
+				if file_states.get(filename) != current_hash:
+					if FLEARN_DEBUG:
+						print(f"New or modified file detected: {filename}")
+
+					text = file_path.read_text(encoding='utf-8')
+					content.append(f"--- Document: {filename} ---\n{text}\n")
+					new_file_states[filename] = current_hash
+				else:
+					if FLEARN_DEBUG:
+						print(f"Unchanged, skipping: {filename}")
 			except Exception as e:
 				print(f"Warning: Could not read {file_path.name}: {e}")
 
-	return "\n".join(content)
+	return "\n".join(content), new_file_states
 
 
-def get_llm_flashcards(content: str):
+def get_llm_flashcards(content: str) -> list[dict]:
 	try:
 		response = get_client().chat.completions.create(
 			model="llama-3.3-70b-versatile",
@@ -71,10 +113,59 @@ def get_llm_flashcards(content: str):
 		return []
 
 
-def gen(args):
+def sync_files(target_dir: Path, file_states: dict, cards_by_file: dict, force_regen: bool) -> bool:
+	has_changes = False
+	current_files = set()
+
+	for file_path in target_dir.glob("*"):
+		if file_path.suffix.lower() not in ['.txt', '.md']:
+			continue
+
+		filename = file_path.name
+		current_files.add(filename)
+
+		try:
+			current_hash = get_file_hash(file_path)
+			is_modified = file_states.get(filename) != current_hash
+
+			if force_regen or is_modified:
+				if FLEARN_DEBUG:
+					status = "Regenerating" if force_regen else ("New" if filename not in file_states else "Modified")
+					print(f"[DEBUG] {status} file detected: {filename}")
+
+				print(f"Processing: {filename}...")
+				text = file_path.read_text(encoding='utf-8')
+				generated_cards = get_llm_flashcards(text)
+
+				if generated_cards:
+					cards_by_file[filename] = generated_cards
+					file_states[filename] = current_hash
+					has_changes = True
+				else:
+					print(f"Warning: Failed to generate cards for {filename}")
+			else:
+				if FLEARN_DEBUG:
+					print(f"[DEBUG] Unchanged, skipping: {filename}")
+
+		except Exception as e:
+			print(f"Warning: Could not process {filename}: {e}")
+
+	deleted_files = [file for file in file_states.keys() if file not in current_files]
+
+	for deleted_file in deleted_files:
+		if FLEARN_DEBUG:
+			print(f"[DEBUG] Removing deleted file from state: {deleted_file}")
+
+		file_states.pop(deleted_file, None)
+		cards_by_file.pop(deleted_file, None)
+		has_changes = True
+
+	return has_changes
+
+
+def gen(args, force_regen: bool = False):
 	target_dir = Path(args.directory).resolve()
 	group_name = target_dir.name
-
 	database_path = FLEARN_FOLDER / f"{group_name}.json"
 
 	if FLEARN_DEBUG:
@@ -86,43 +177,28 @@ def gen(args):
 		print(f"Error: Directory '{args.directory}' does not exist.")
 		return
 
-	print(f"Scanning '{group_name}' for text and markdown files...")
-	text = get_text_files(target_dir)
+	database_data = load_database(database_path)
+	file_states = {} if force_regen else database_data.get("file_states", {})
+	cards_by_file = {} if force_regen else database_data.get("cards_by_file", {})
 
-	if not text.strip():
-		print("No valid text or markdown files found in the directory.")
+	action_str = "Regenerating all" if force_regen else "Scanning for new or modified"
+	print(f"{action_str} files in group '{group_name}'...")
+
+	has_changes = sync_files(target_dir, file_states, cards_by_file, force_regen)
+
+	if not has_changes:
+		print("No new or modified files found. Everything is up to date!")
 		return
-
-	print(f"Generating new flashcards for group '{group_name}' from {target_dir}...")
-
-	generated_cards = get_llm_flashcards(text)
-	if not generated_cards:
-		print("Failed to generate flashcards.")
-		return
-
-	existing_cards = []
-	if database_path.exists():
-		try:
-			existing_data = json.loads(database_path.read_text())
-			existing_cards = existing_data.get("cards", [])
-		except json.JSONDecodeError:
-			pass
 
 	save_data = {
 		"group": group_name,
 		"source_dir": str(target_dir),
-		"cards": existing_cards + generated_cards
+		"file_states": file_states,
+		"cards_by_file": cards_by_file
 	}
 
 	database_path.write_text(json.dumps(save_data, indent=4))
 	print(f"New flashcards saved to group '{group_name}'.")
-
-
-def regen(args):
-	target_dir = Path(args.directory).resolve()
-	group_name = target_dir.name
-	print(f"Regenerating all flashcards for group '{group_name}' from {target_dir}...")
-	# TODO: Implement full overwrite logic
 
 
 def view(args):
@@ -138,18 +214,19 @@ def view(args):
 		print("Run 'flearn ls' to see avaliable groups.")
 		return
 
-	try:
-		data = json.loads(database_path.read_text())
-		cards = data.get("cards", [])
+	database_data = load_database(database_path)
+	cards = get_all_cards(database_data)
 
-		print(f"\n--- Flashcards: {group_name} ---")
-		for i, card in enumerate(cards, 1):
-			print(f"\nCard {i}:")
-			print(f"  Q: {card.get('front')}")
-			print(f"  A: {card.get('back')}")
-		print("\n" + "-" * 30)
-	except json.JSONDecodeError:
-		print(f"Error: The file {database_path} is corrupted or not valid JSON.")
+	if not cards:
+		print(f"No cards in group '{group_name}'")
+		return
+
+	print(f"\n--- Flashcards: {group_name} ---")
+	for i, card in enumerate(cards, 1):
+		print(f"\nCard {i}:")
+		print(f"  Q: {card.get('front')}")
+		print(f"  A: {card.get('back')}")
+	print("\n" + "-" * 30)
 
 
 def ls():
@@ -183,37 +260,33 @@ def study(args):
 		print("Run 'flearn ls' to see available groups.")
 		return
 
-	try:
-		data = json.loads(database_path.read_text())
-		cards = data.get("cards", [])
+	database_data = load_database(database_path)
+	cards = get_all_cards(database_data)
 
-		if not cards:
-			print(f"No cards found in group '{group_name}'.")
-			return
+	if not cards:
+		print(f"No cards in group '{group_name}'")
+		return
 
-		print(f"\n--- Studying: {group_name} ---")
-		print("Press [Enter] to reveal answers. Type 'q' and [Enter] to quit.\n")
+	print(f"\n--- Studying: {group_name} ---")
+	print("Press [Enter] to reveal answers. Type 'q' and [Enter] to quit.\n")
 
-		for i, card in enumerate(cards, 1):
-			print(f"Card {i} of {len(cards)}")
-			print(f"Q: {card.get('front')}")
+	for i, card in enumerate(cards, 1):
+		print(f"Card {i} of {len(cards)}")
+		print(f"Q: {card.get('front')}")
 
-			user_input = input("\n> Press Enter to reveal answer...")
+		user_input = input("\n> Press Enter to reveal answer...")
+		if user_input.strip().lower() == 'q':
+			break
+
+		print(f"A: {card.get('back')}")
+		print("-" * 40)
+
+		if i < len(cards):
+			user_input = input("> Press Enter for next card...")
 			if user_input.strip().lower() == 'q':
 				break
 
-			print(f"A: {card.get('back')}")
-			print("-" * 40)
-
-			if i < len(cards):
-				user_input = input("> Press Enter for next card...")
-				if user_input.strip().lower() == 'q':
-					break
-
-		print("\nStudy session complete.")
-
-	except json.JSONDecodeError:
-		print(f"Error: The file {database_path} is corrupted or not valid JSON.")
+	print("\nStudy session complete.")
 
 
 def main():
@@ -249,17 +322,14 @@ def main():
 		parser.print_help()
 		return
 
-	if args.debug:
-		global FLEARN_DEBUG
-		FLEARN_DEBUG = True
-	else:
-		FLEARN_DEBUG = False
+	global FLEARN_DEBUG
+	FLEARN_DEBUG = args.debug
 
 	if args.command == "gen":
-		gen(args)
+		gen(args, False)
 
 	if args.command == "regen":
-		regen(args)
+		gen(args, True)
 
 	if args.command == "view":
 		view(args)
