@@ -2,6 +2,9 @@ import argparse
 import hashlib
 import json
 import os
+import sys
+import shutil
+from pathlib import Path
 
 from pypdf import PdfReader
 import docx
@@ -11,7 +14,6 @@ from PIL import Image
 
 from groq import Groq
 from dotenv import load_dotenv
-from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -21,9 +23,13 @@ load_dotenv()
 
 console = Console()
 
-FLEARN_API_KEY = os.environ.get("FLEARN_API_KEY", None)
-FLEARN_FOLDER = Path(os.environ.get('FLEARN_FOLDER', '~/.flearn')).expanduser()
+FLEARN_API_KEY = None
+FLEARN_FOLDER = None
 FLEARN_DEBUG = False
+
+CONFIG_DIR = Path.home() / ".flearn"
+CONFIG_FILE = CONFIG_DIR / ".env"
+
 FLEARN_FLASHCARD_GEN_PROMPT = """
 You are a precise flashcard generator. Read the provided study materials and extract the most important concepts.
 
@@ -61,13 +67,55 @@ def print_info(msg: str):
 	console.print(f"[bold yellow][ INFO ][/bold yellow] {msg}")
 
 
+def setup_wizard():
+	CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+	if not CONFIG_FILE.exists():
+		console.print(Panel("Welcome to [bold cyan]flearn[/bold cyan] setup", style="blue"))
+
+		api_key = Prompt.ask("Enter your [bold]Groq API Key[/bold]", password=True).strip()
+		db_folder = Prompt.ask("Where should flashcard data be saved?", default="~/.flearn").strip()
+
+		env_content = f"FLEARN_API_KEY={api_key}\nFLEARN_FOLDER={db_folder}\n"
+		CONFIG_FILE.write_text(env_content)
+		print_success(f"Configuration saved to {CONFIG_FILE}\n")
+
+	load_dotenv(dotenv_path=CONFIG_FILE)
+
+	global FLEARN_API_KEY, FLEARN_FOLDER
+	FLEARN_API_KEY = os.environ.get("FLEARN_API_KEY")
+	folder_str = os.environ.get('FLEARN_FOLDER', '~/.flearn')
+	FLEARN_FOLDER = Path(folder_str).expanduser()
+	FLEARN_FOLDER.mkdir(parents=True, exist_ok=True)
+
+	if getattr(sys, 'frozen', False):
+		current_path = Path(sys.executable).resolve()
+		target_dir = Path.home() / ".local" / "bin"
+		target_path = target_dir / "flearn"
+
+		if current_path != target_path:
+			install = Confirm.ask(f"Do you want to install flearn globally to [bold]{target_path}[/bold]?", default=True)
+			if install:
+				try:
+					target_dir.mkdir(parents=True, exist_ok=True)
+					shutil.copy2(current_path, target_path)
+
+					target_path.chmod(0o755)
+					print_success("Installation complete!")
+					console.print("[dim]You can now run 'flearn' from anywhere. (You may need to restart your terminal).[/dim]")
+
+					sys.exit(0)
+				except Exception as e:
+					print_error(f"Failed to install globally: {e}")
+
+
 def get_client() -> Groq:
 	global client
 
 	if client is None:
 		if not FLEARN_API_KEY:
 			print_error("FLEARN_API_KEY is not set. Please check your .env file.")
-			exit(1)
+			sys.exit(1)
 		client = Groq(api_key=FLEARN_API_KEY)
 
 	return client
@@ -200,15 +248,15 @@ def sync_files(target_dir: Path, file_states: dict, cards_by_file: dict, force_r
 					status = "Regenerating" if force_regen else ("New" if filename not in file_states else "Modified")
 					dprint(f"{status} file detected: {filename}")
 
-				print_info(f"Processing: [bold]{filename}[/bold]...")
-				text = text_from_file(filepath)
+				with console.status(f"[bold cyan]Extracting & Generating cards for {filename}...[/bold cyan]", spinner="dots"):
+					text = text_from_file(filepath)
 
-				if not text:
-					console.print(
-						f"[bold yellow][ WARNING ][/bold yellow] No readable text found in {filename}. Skipping.")
-					continue
+					if not text:
+						console.print(
+							f"[bold yellow][ WARNING ][/bold yellow] No readable text found in {filename}. Skipping.")
+						continue
 
-				generated_cards = get_llm_flashcards(text)
+					generated_cards = get_llm_flashcards(text)
 
 				if generated_cards:
 					cards_by_file[filename] = review_cards(generated_cards)
@@ -411,7 +459,7 @@ def study(args):
 
 
 def main():
-	FLEARN_FOLDER.mkdir(parents=True, exist_ok=True)
+	setup_wizard()
 
 	parser = argparse.ArgumentParser(prog="flearn", description="CLI AI-supported tool for quickly creating flashcards from materials you put in.")
 	parser.add_argument("--debug", action="store_true", help="enable debug output")
