@@ -9,8 +9,17 @@ from pathlib import Path
 load_dotenv()
 
 FLEARN_API_KEY = os.environ.get("FLEARN_API_KEY", None)
-FLEARN_DEBUG = False
 FLEARN_FOLDER = Path(os.environ.get('FLEARN_FOLDER', '~/.flearn')).expanduser()
+FLEARN_DEBUG = False
+FLEARN_FLASHCARD_GEN_PROMPT = """
+You are a precise flashcard generator. Read the provided study materials and extract the most important concepts.
+Output ONLY valid JSON in the following exact format:
+{
+  "cards": [
+    {"front": "Question or concept?", "back": "Answer or definition."}
+  ]
+}
+"""
 
 client: Groq | None = None
 
@@ -25,6 +34,41 @@ def get_client() -> Groq:
 		client = Groq(api_key=FLEARN_API_KEY)
 
 	return client
+
+
+def get_text_files(target_dir: Path) -> str:
+	content = []
+
+	for file_path in target_dir.glob("*"):
+		if file_path.suffix.lower() in ['.txt', '.md']:
+			if FLEARN_DEBUG:
+				print(f"Reading file: {file_path.name}")
+			try:
+				text = file_path.read_text(encoding='utf-8')
+				content.append(f"--- Document: {file_path.name} ---\n{text}\n")
+			except Exception as e:
+				print(f"Warning: Could not read {file_path.name}: {e}")
+
+	return "\n".join(content)
+
+
+def get_llm_flashcards(content: str):
+	try:
+		response = get_client().chat.completions.create(
+			model="llama-3.3-70b-versatile",
+			messages=[
+				{"role": "system", "content": FLEARN_FLASHCARD_GEN_PROMPT},
+				{"role": "user", "content": content}
+			],
+			response_format={"type": "json_object"},
+			temperature=0.3
+		)
+
+		result = json.loads(response.choices[0].message.content)
+		return result.get("cards", [])
+	except Exception as e:
+		print(f"Error communicating with Groq: {e}")
+		return []
 
 
 def gen(args):
@@ -42,18 +86,35 @@ def gen(args):
 		print(f"Error: Directory '{args.directory}' does not exist.")
 		return
 
+	print(f"Scanning '{group_name}' for text and markdown files...")
+	text = get_text_files(target_dir)
+
+	if not text.strip():
+		print("No valid text or markdown files found in the directory.")
+		return
+
 	print(f"Generating new flashcards for group '{group_name}' from {target_dir}...")
 
-	# TODO: pass content to llm here
-	mock_data = {
+	generated_cards = get_llm_flashcards(text)
+	if not generated_cards:
+		print("Failed to generate flashcards.")
+		return
+
+	existing_cards = []
+	if database_path.exists():
+		try:
+			existing_data = json.loads(database_path.read_text())
+			existing_cards = existing_data.get("cards", [])
+		except json.JSONDecodeError:
+			pass
+
+	save_data = {
 		"group": group_name,
 		"source_dir": str(target_dir),
-		"cards": [
-			{"front": "What does flearn do?", "back": "Generates flashcards using AI!"}
-		]
+		"cards": existing_cards + generated_cards
 	}
 
-	database_path.write_text(json.dumps(mock_data, indent=4))
+	database_path.write_text(json.dumps(save_data, indent=4))
 	print(f"New flashcards saved to group '{group_name}'.")
 
 
