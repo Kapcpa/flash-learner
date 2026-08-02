@@ -3,6 +3,12 @@ import hashlib
 import json
 import os
 
+from pypdf import PdfReader
+import docx
+from pptx import Presentation
+import pytesseract
+from PIL import Image
+
 from groq import Groq
 from dotenv import load_dotenv
 from pathlib import Path
@@ -14,11 +20,18 @@ FLEARN_FOLDER = Path(os.environ.get('FLEARN_FOLDER', '~/.flearn')).expanduser()
 FLEARN_DEBUG = False
 FLEARN_FLASHCARD_GEN_PROMPT = """
 You are a precise flashcard generator. Read the provided study materials and extract the most important concepts.
+
+Rules:
+1. Ignore all introductory filler, table of contents, opinions, conversational text or trivia.
+2. Focus exclusively on "What is [Concept]?", "Why is [Concept] used?", and "How does [Mechanism] work?".
+3. If a page or slide contains no concrete definitions, skip it entirely.
+4. Keep the "back" of the flashcard concise and factu
+
 Output ONLY valid JSON in the following exact format:
 {
-  "cards": [
-	{"front": "Question or concept?", "back": "Answer or definition."}
-  ]
+    "cards": [
+		{"front": "What is the definition of [Concept]?", "back": "[Strict factual definition]"}  
+	]
 }
 """
 
@@ -68,32 +81,6 @@ def get_all_cards(data: dict) -> list[dict]:
 	return data.get("cards", [])
 
 
-def get_text_files(target_dir: Path, file_states: dict) -> tuple[str, dict]:
-	content = []
-	new_file_states = file_states.copy()
-
-	for file_path in target_dir.glob("*"):
-		if file_path.suffix.lower() in ['.txt', '.md']:
-			try:
-				current_hash = get_file_hash(file_path)
-				filename = file_path.name
-
-				if file_states.get(filename) != current_hash:
-					if FLEARN_DEBUG:
-						print(f"New or modified file detected: {filename}")
-
-					text = file_path.read_text(encoding='utf-8')
-					content.append(f"--- Document: {filename} ---\n{text}\n")
-					new_file_states[filename] = current_hash
-				else:
-					if FLEARN_DEBUG:
-						print(f"Unchanged, skipping: {filename}")
-			except Exception as e:
-				print(f"Warning: Could not read {file_path.name}: {e}")
-
-	return "\n".join(content), new_file_states
-
-
 def get_llm_flashcards(content: str) -> list[dict]:
 	try:
 		response = get_client().chat.completions.create(
@@ -113,28 +100,69 @@ def get_llm_flashcards(content: str) -> list[dict]:
 		return []
 
 
+def text_from_file(filepath: Path) -> str:
+	ext = filepath.suffix.lower()
+	text = ""
+
+	try:
+		if ext in ['.txt', '.md']:
+			text = filepath.read_text(encoding='utf-8')
+		elif ext == '.pdf':
+			reader = PdfReader(filepath)
+			for page in reader.pages:
+				extracted = page.extract_text()
+				if extracted:
+					text += extracted + "\n"
+		elif ext == '.docx':
+			doc = docx.Document(filepath)
+			text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+		elif ext == '.pptx':
+			prs = Presentation(filepath)
+			for slide in prs.slides:
+				for shape in slide.shapes:
+					if hasattr(shape, "text"):
+						text += shape.text + "\n"
+		elif ext in ['.png', '.jpg', '.jpeg']:
+			img = Image.open(filepath)
+			text = pytesseract.image_to_string(img)
+	except Exception as e:
+		print(f"Error extracting text from {filepath.name}: {e}")
+
+	return text
+
+
+
 def sync_files(target_dir: Path, file_states: dict, cards_by_file: dict, force_regen: bool) -> bool:
 	has_changes = False
 	current_files = set()
 
-	for file_path in target_dir.glob("*"):
-		if file_path.suffix.lower() not in ['.txt', '.md']:
+	supported_extensions = ['.txt', '.md', '.pdf', '.docx', '.pptx', '.png', '.jpg', '.jpeg']
+
+	for filepath in target_dir.glob("*"):
+		filename = filepath.name
+
+		if filepath.suffix.lower() not in supported_extensions:
+			print(f"Warning: Filetype of {filename} not supported. Skipping.")
 			continue
 
-		filename = file_path.name
 		current_files.add(filename)
 
 		try:
-			current_hash = get_file_hash(file_path)
+			current_hash = get_file_hash(filepath)
 			is_modified = file_states.get(filename) != current_hash
 
 			if force_regen or is_modified:
 				if FLEARN_DEBUG:
 					status = "Regenerating" if force_regen else ("New" if filename not in file_states else "Modified")
-					print(f"[DEBUG] {status} file detected: {filename}")
+					print(f"{status} file detected: {filename}")
 
 				print(f"Processing: {filename}...")
-				text = file_path.read_text(encoding='utf-8')
+				text = text_from_file(filepath)
+
+				if not text:
+					print(f"Warning: No readable text found in {filename}. Skipping.")
+					continue
+
 				generated_cards = get_llm_flashcards(text)
 
 				if generated_cards:
@@ -145,8 +173,7 @@ def sync_files(target_dir: Path, file_states: dict, cards_by_file: dict, force_r
 					print(f"Warning: Failed to generate cards for {filename}")
 			else:
 				if FLEARN_DEBUG:
-					print(f"[DEBUG] Unchanged, skipping: {filename}")
-
+					print(f"Unchanged, skipping: {filename}")
 		except Exception as e:
 			print(f"Warning: Could not process {filename}: {e}")
 
@@ -154,7 +181,7 @@ def sync_files(target_dir: Path, file_states: dict, cards_by_file: dict, force_r
 
 	for deleted_file in deleted_files:
 		if FLEARN_DEBUG:
-			print(f"[DEBUG] Removing deleted file from state: {deleted_file}")
+			print(f"Removing deleted file from state: {deleted_file}")
 
 		file_states.pop(deleted_file, None)
 		cards_by_file.pop(deleted_file, None)
