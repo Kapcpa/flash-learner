@@ -13,7 +13,13 @@ from groq import Groq
 from dotenv import load_dotenv
 from pathlib import Path
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
+
 load_dotenv()
+
+console = Console()
 
 FLEARN_API_KEY = os.environ.get("FLEARN_API_KEY", None)
 FLEARN_FOLDER = Path(os.environ.get('FLEARN_FOLDER', '~/.flearn')).expanduser()
@@ -38,12 +44,29 @@ Output ONLY valid JSON in the following exact format:
 client: Groq | None = None
 
 
+def dprint(msg: str):
+	if FLEARN_DEBUG:
+		console.print(f"[dim][DEBUG] {msg}[/dim]")
+
+
+def print_error(msg: str):
+	console.print(f"[bold red][ ERROR ][/bold red] {msg}")
+
+
+def print_success(msg: str):
+	console.print(f"[bold green][ SUCCESS ][/bold green] {msg}")
+
+
+def print_info(msg: str):
+	console.print(f"[bold yellow][ INFO ][/bold yellow] {msg}")
+
+
 def get_client() -> Groq:
 	global client
 
 	if client is None:
 		if not FLEARN_API_KEY:
-			print("Error: FLEARN_API_KEY is not set. Please check your .env file.")
+			print_error("FLEARN_API_KEY is not set. Please check your .env file.")
 			exit(1)
 		client = Groq(api_key=FLEARN_API_KEY)
 
@@ -63,7 +86,8 @@ def load_database(database_path: Path) -> dict:
 	try:
 		return json.loads(database_path.read_text())
 	except json.JSONDecodeError:
-		print(f"Warning: Database file '{database_path.name}' is corrupted. Starting fresh.")
+		console.print(
+			f"[bold yellow][ WARNING ][/bold yellow] Database file '{database_path.name}' is corrupted. Starting fresh.")
 		return {}
 
 
@@ -96,7 +120,7 @@ def get_llm_flashcards(content: str) -> list[dict]:
 		result = json.loads(response.choices[0].message.content)
 		return result.get("cards", [])
 	except Exception as e:
-		print(f"Error communicating with Groq: {e}")
+		print_error(f"Communicating with Groq: {e}")
 		return []
 
 
@@ -126,10 +150,30 @@ def text_from_file(filepath: Path) -> str:
 			img = Image.open(filepath)
 			text = pytesseract.image_to_string(img)
 	except Exception as e:
-		print(f"Error extracting text from {filepath.name}: {e}")
+		print_error(f"Extracting text from {filepath.name}: {e}")
 
 	return text
 
+
+def review_cards(cards: list[dict]) -> list[dict]:
+	approved_cards = []
+
+	if not cards:
+		return approved_cards
+
+	console.print(f"\n[bold magenta]--- Reviewing {len(cards)} generated cards ---[/bold magenta]")
+
+	for i, card in enumerate(cards, 1):
+		content = f"[bold cyan]Q:[/bold cyan] {card.get('front')}\n[bold yellow]A:[/bold yellow] {card.get('back')}"
+		console.print(Panel(content, title=f"Card {i}/{len(cards)}", border_style="blue", padding=(1, 2)))
+
+		keep = Confirm.ask("Keep this card?", default=True)
+		if keep:
+			approved_cards.append(card)
+		else:
+			console.print("[dim]-> Card discarded.[/dim]\n")
+
+	return approved_cards
 
 
 def sync_files(target_dir: Path, file_states: dict, cards_by_file: dict, force_regen: bool) -> bool:
@@ -142,7 +186,7 @@ def sync_files(target_dir: Path, file_states: dict, cards_by_file: dict, force_r
 		filename = filepath.name
 
 		if filepath.suffix.lower() not in supported_extensions:
-			print(f"Warning: Filetype of {filename} not supported. Skipping.")
+			console.print(f"[bold yellow][ WARNING ][/bold yellow] Filetype of {filename} not supported. Skipping.")
 			continue
 
 		current_files.add(filename)
@@ -154,34 +198,33 @@ def sync_files(target_dir: Path, file_states: dict, cards_by_file: dict, force_r
 			if force_regen or is_modified:
 				if FLEARN_DEBUG:
 					status = "Regenerating" if force_regen else ("New" if filename not in file_states else "Modified")
-					print(f"{status} file detected: {filename}")
+					dprint(f"{status} file detected: {filename}")
 
-				print(f"Processing: {filename}...")
+				print_info(f"Processing: [bold]{filename}[/bold]...")
 				text = text_from_file(filepath)
 
 				if not text:
-					print(f"Warning: No readable text found in {filename}. Skipping.")
+					console.print(
+						f"[bold yellow][ WARNING ][/bold yellow] No readable text found in {filename}. Skipping.")
 					continue
 
 				generated_cards = get_llm_flashcards(text)
 
 				if generated_cards:
-					cards_by_file[filename] = generated_cards
+					cards_by_file[filename] = review_cards(generated_cards)
 					file_states[filename] = current_hash
 					has_changes = True
 				else:
-					print(f"Warning: Failed to generate cards for {filename}")
+					console.print(f"[bold yellow][ WARNING ][/bold yellow] Failed to generate cards for {filename}")
 			else:
-				if FLEARN_DEBUG:
-					print(f"Unchanged, skipping: {filename}")
+				dprint(f"Unchanged, skipping: {filename}")
 		except Exception as e:
-			print(f"Warning: Could not process {filename}: {e}")
+			console.print(f"[bold yellow][ WARNING ][/bold yellow] Could not process {filename}: {e}")
 
 	deleted_files = [file for file in file_states.keys() if file not in current_files]
 
 	for deleted_file in deleted_files:
-		if FLEARN_DEBUG:
-			print(f"Removing deleted file from state: {deleted_file}")
+		dprint(f"Removing deleted file from state: {deleted_file}")
 
 		file_states.pop(deleted_file, None)
 		cards_by_file.pop(deleted_file, None)
@@ -195,13 +238,12 @@ def gen(args, force_regen: bool = False):
 	group_name = target_dir.name
 	database_path = FLEARN_FOLDER / f"{group_name}.json"
 
-	if FLEARN_DEBUG:
-		print(f"Target Directiory: {target_dir}")
-		print(f"Group Name: {group_name}")
-		print(f"Saving to Database Path: {database_path}")
+	dprint(f"Target Directory: {target_dir}")
+	dprint(f"Group Name: {group_name}")
+	dprint(f"Saving to Database Path: {database_path}")
 
 	if not target_dir.exists() or not target_dir.is_dir():
-		print(f"Error: Directory '{args.directory}' does not exist.")
+		print_error(f"Directory '{args.directory}' does not exist.")
 		return
 
 	database_data = load_database(database_path)
@@ -209,12 +251,12 @@ def gen(args, force_regen: bool = False):
 	cards_by_file = {} if force_regen else database_data.get("cards_by_file", {})
 
 	action_str = "Regenerating all" if force_regen else "Scanning for new or modified"
-	print(f"{action_str} files in group '{group_name}'...")
+	console.print(Panel(f"{action_str} files in [bold cyan]{group_name}[/bold cyan]...", style="blue"))
 
 	has_changes = sync_files(target_dir, file_states, cards_by_file, force_regen)
 
 	if not has_changes:
-		print("No new or modified files found. Everything is up to date!")
+		print_success("No new or modified files found. Everything is up to date!")
 		return
 
 	save_data = {
@@ -225,95 +267,147 @@ def gen(args, force_regen: bool = False):
 	}
 
 	database_path.write_text(json.dumps(save_data, indent=4))
-	print(f"New flashcards saved to group '{group_name}'.")
+	print_success(f"New flashcards saved to group '{group_name}'.")
+
+
+def rm(args):
+	group_name = args.group
+	target_card_numbers = sorted(args.card_numbers, reverse=True)
+	database_path = FLEARN_FOLDER / f"{group_name}.json"
+
+	dprint(f"Removing cards {target_card_numbers} from group {group_name}")
+
+	if not database_path.exists():
+		print_error(f"No flashcards found for group '{group_name}'.")
+		return
+
+	database_data = load_database(database_path)
+	cards_by_file = database_data.get("cards_by_file", {})
+
+	total_cards_deleted = 0
+
+	for target_card_num in target_card_numbers:
+		current_index = 0
+		deleted = False
+		target_index_0_based = target_card_num - 1
+
+		for filename, file_cards in cards_by_file.items():
+			if current_index <= target_index_0_based < current_index + len(file_cards):
+				local_index = target_index_0_based - current_index
+				removed_card = file_cards.pop(local_index)
+
+				print_success(f"Deleted Card {target_card_num}:")
+				console.print(f"  [dim]Q: {removed_card.get('front')}[/dim]")
+				deleted = True
+				total_cards_deleted += 1
+				break
+
+			current_index += len(file_cards)
+
+		if not deleted:
+			console.print(f"[bold yellow][ WARNING ][/bold yellow] Card number {target_card_num} not found. Skipping.")
+
+	if total_cards_deleted > 0:
+		save_data = {
+			"group": group_name,
+			"source_dir": database_data.get("source_dir", ""),
+			"file_states": database_data.get("file_states", {}),
+			"cards_by_file": cards_by_file
+		}
+		database_path.write_text(json.dumps(save_data, indent=4))
+		print_success(f"Total cards removed: {total_cards_deleted}")
+	else:
+		print_info("No cards were removed.")
 
 
 def view(args):
 	group_name = args.group
 	database_path = FLEARN_FOLDER / f"{group_name}.json"
 
-	if FLEARN_DEBUG:
-		print(f"Looking up Group Name: {group_name}")
-		print(f"Reading from Database Path: {database_path}")
+	dprint(f"Looking up Group Name: {group_name}")
+	dprint(f"Reading from Database Path: {database_path}")
 
 	if not database_path.exists():
-		print(f"Error: No flashcards found for group '{group_name}'.")
-		print("Run 'flearn ls' to see avaliable groups.")
+		print_error(f"No flashcards found for group '{group_name}'.")
+		print_info("Run 'flearn ls' to see avaliable groups.")
 		return
 
 	database_data = load_database(database_path)
 	cards = get_all_cards(database_data)
 
 	if not cards:
-		print(f"No cards in group '{group_name}'")
+		print_info(f"No cards in group '{group_name}'")
 		return
 
-	print(f"\n--- Flashcards: {group_name} ---")
+	console.print(Panel(f"Deck: [bold cyan]{group_name}[/bold cyan] ({len(cards)} cards)", style="blue"))
+
 	for i, card in enumerate(cards, 1):
-		print(f"\nCard {i}:")
-		print(f"  Q: {card.get('front')}")
-		print(f"  A: {card.get('back')}")
-	print("\n" + "-" * 30)
+		content = f"[bold cyan]Q:[/bold cyan] {card.get('front')}\n[bold yellow]A:[/bold yellow] {card.get('back')}"
+		console.print(Panel(content, title=f"Card {i}", border_style="magenta", padding=(1, 2)))
 
 
 def ls():
-	if FLEARN_DEBUG:
-		print(f"Scanning Database Folder: {FLEARN_FOLDER}")
-
-	print("Available flashcard groups:")
+	dprint(f"Scanning Database Folder: {FLEARN_FOLDER}")
 
 	if not FLEARN_FOLDER.exists():
-		print("  No groups found (database folder is empty).")
+		print_info("No groups found (database folder is empty).")
 		return
 
-	found = False
-	for file in FLEARN_FOLDER.glob("*.json"):
-		found = True
-		print(f"  - {file.stem}")
+	groups = list(FLEARN_FOLDER.glob("*.json"))
+	if not groups:
+		print_info("No groups found.")
+		return
 
-	if not found:
-		print("  No groups found.")
+	console.print("\n[bold]Available flashcard groups:[/bold]")
+	for file in groups:
+		console.print(f"  [bold cyan]•[/bold cyan] {file.stem}")
+	console.print()
 
 
 def study(args):
 	group_name = args.group
 	database_path = FLEARN_FOLDER / f"{group_name}.json"
 
-	if FLEARN_DEBUG:
-		print(f"Loading Study Session for Group: {group_name}")
+	dprint(f"Loading Study Session for Group: {group_name}")
 
 	if not database_path.exists():
-		print(f"Error: No flashcards found for group '{group_name}'.")
-		print("Run 'flearn ls' to see available groups.")
+		print_error(f"No flashcards found for group '{group_name}'.")
+		print_info("Run 'flearn ls' to see available groups.")
 		return
 
 	database_data = load_database(database_path)
 	cards = get_all_cards(database_data)
 
 	if not cards:
-		print(f"No cards in group '{group_name}'")
+		print_info(f"No cards in group '{group_name}'")
 		return
 
-	print(f"\n--- Studying: {group_name} ---")
-	print("Press [Enter] to reveal answers. Type 'q' and [Enter] to quit.\n")
-
 	for i, card in enumerate(cards, 1):
-		print(f"Card {i} of {len(cards)}")
-		print(f"Q: {card.get('front')}")
+		console.clear()
+		console.print(Panel(f"Study Session: [bold cyan]{group_name}[/bold cyan]", style="blue"))
+		console.print("[dim]Press [Enter] to reveal answers. Type 'q' to quit.[/dim]\n")
 
-		user_input = input("\n> Press Enter to reveal answer...")
-		if user_input.strip().lower() == 'q':
+		question_content = f"[bold cyan]Q:[/bold cyan] {card.get('front')}"
+		console.print(Panel(question_content, title=f"Card {i} of {len(cards)}", border_style="blue", padding=(1, 2)))
+
+		user_input = Prompt.ask("\n[dim]Reveal answer...[/dim]").strip().lower()
+		if user_input == 'q':
 			break
 
-		print(f"A: {card.get('back')}")
-		print("-" * 40)
+		console.clear()
+		console.print(Panel(f"Study Session: [bold cyan]{group_name}[/bold cyan]", style="blue"))
+		console.print("[dim]Press [Enter] to reveal answers. Type 'q' to quit.[/dim]\n")
+
+		full_content = f"[bold cyan]Q:[/bold cyan] {card.get('front')}\n[bold yellow]A:[/bold yellow] {card.get('back')}"
+		console.print(Panel(full_content, title=f"Card {i} of {len(cards)}", border_style="green", padding=(1, 2)))
 
 		if i < len(cards):
-			user_input = input("> Press Enter for next card...")
-			if user_input.strip().lower() == 'q':
+			user_input = Prompt.ask("\n[dim]Next card...[/dim]").strip().lower()
+			if user_input == 'q':
 				break
 
-	print("\nStudy session complete.")
+	console.print()
+	print_success("Study session complete.")
 
 
 def main():
@@ -331,6 +425,11 @@ def main():
 	# flearn regen <directory>
 	parser_regen = subparsers.add_parser("regen", help="regenerates flashcards from all the data in a given directory")
 	parser_regen.add_argument("directory", type=str, help="target directory")
+
+	# flearn rm <group> <card_numbers...>
+	parser_rm = subparsers.add_parser("rm", help="removes specific flashcards by their numbers")
+	parser_rm.add_argument("group", type=str, help="name of the flashcard group")
+	parser_rm.add_argument("card_numbers", type=int, nargs="+", help="the numbers of the cards to discard (as shown in view, separated by spaces)")
 
 	# flearn view <group>
 	parser_view = subparsers.add_parser("view", help="views flashcards from a given group")
@@ -352,20 +451,21 @@ def main():
 	global FLEARN_DEBUG
 	FLEARN_DEBUG = args.debug
 
-	if args.command == "gen":
-		gen(args, False)
-
-	if args.command == "regen":
-		gen(args, True)
-
-	if args.command == "view":
-		view(args)
-
-	if args.command == "ls":
-		ls()
-
-	if args.command == "study":
-		study(args)
+	try:
+		if args.command == "gen":
+			gen(args, False)
+		elif args.command == "regen":
+			gen(args, True)
+		elif args.command == "rm":
+			rm(args)
+		elif args.command == "view":
+			view(args)
+		elif args.command == "ls":
+			ls()
+		elif args.command == "study":
+			study(args)
+	except KeyboardInterrupt:
+		print_info("Process interrupted by user. Exiting...")
 
 
 if __name__ == "__main__":
