@@ -50,7 +50,7 @@ Output ONLY valid JSON in the following exact format:
 client: Groq | None = None
 
 
-def dprint(msg: str):
+def print_debug(msg: str):
 	if FLEARN_DEBUG:
 		console.print(f"[dim][DEBUG] {msg}[/dim]")
 
@@ -246,7 +246,7 @@ def sync_files(target_dir: Path, file_states: dict, cards_by_file: dict, force_r
 			if force_regen or is_modified:
 				if FLEARN_DEBUG:
 					status = "Regenerating" if force_regen else ("New" if filename not in file_states else "Modified")
-					dprint(f"{status} file detected: {filename}")
+					print_debug(f"{status} file detected: {filename}")
 
 				with console.status(f"[bold cyan]Extracting & Generating cards for {filename}...[/bold cyan]", spinner="dots"):
 					text = text_from_file(filepath)
@@ -265,14 +265,14 @@ def sync_files(target_dir: Path, file_states: dict, cards_by_file: dict, force_r
 				else:
 					console.print(f"[bold yellow][ WARNING ][/bold yellow] Failed to generate cards for {filename}")
 			else:
-				dprint(f"Unchanged, skipping: {filename}")
+				print_debug(f"Unchanged, skipping: {filename}")
 		except Exception as e:
 			console.print(f"[bold yellow][ WARNING ][/bold yellow] Could not process {filename}: {e}")
 
 	deleted_files = [file for file in file_states.keys() if file not in current_files]
 
 	for deleted_file in deleted_files:
-		dprint(f"Removing deleted file from state: {deleted_file}")
+		print_debug(f"Removing deleted file from state: {deleted_file}")
 
 		file_states.pop(deleted_file, None)
 		cards_by_file.pop(deleted_file, None)
@@ -286,9 +286,9 @@ def gen(args, force_regen: bool = False):
 	group_name = target_dir.name
 	database_path = FLEARN_FOLDER / f"{group_name}.json"
 
-	dprint(f"Target Directory: {target_dir}")
-	dprint(f"Group Name: {group_name}")
-	dprint(f"Saving to Database Path: {database_path}")
+	print_debug(f"Target Directory: {target_dir}")
+	print_debug(f"Group Name: {group_name}")
+	print_debug(f"Saving to Database Path: {database_path}")
 
 	if not target_dir.exists() or not target_dir.is_dir():
 		print_error(f"Directory '{args.directory}' does not exist.")
@@ -323,7 +323,7 @@ def rm(args):
 	target_card_numbers = sorted(args.card_numbers, reverse=True)
 	database_path = FLEARN_FOLDER / f"{group_name}.json"
 
-	dprint(f"Removing cards {target_card_numbers} from group {group_name}")
+	print_debug(f"Removing cards {target_card_numbers} from group {group_name}")
 
 	if not database_path.exists():
 		print_error(f"No flashcards found for group '{group_name}'.")
@@ -372,8 +372,8 @@ def view(args):
 	group_name = args.group
 	database_path = FLEARN_FOLDER / f"{group_name}.json"
 
-	dprint(f"Looking up Group Name: {group_name}")
-	dprint(f"Reading from Database Path: {database_path}")
+	print_debug(f"Looking up Group Name: {group_name}")
+	print_debug(f"Reading from Database Path: {database_path}")
 
 	if not database_path.exists():
 		print_error(f"No flashcards found for group '{group_name}'.")
@@ -395,7 +395,7 @@ def view(args):
 
 
 def ls():
-	dprint(f"Scanning Database Folder: {FLEARN_FOLDER}")
+	print_debug(f"Scanning Database Folder: {FLEARN_FOLDER}")
 
 	if not FLEARN_FOLDER.exists():
 		print_info("No groups found (database folder is empty).")
@@ -416,7 +416,7 @@ def study(args):
 	group_name = args.group
 	database_path = FLEARN_FOLDER / f"{group_name}.json"
 
-	dprint(f"Loading Study Session for Group: {group_name}")
+	print_debug(f"Loading Study Session for Group: {group_name}")
 
 	if not database_path.exists():
 		print_error(f"No flashcards found for group '{group_name}'.")

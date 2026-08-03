@@ -1,9 +1,13 @@
 # flash-learner
 
+---
+
 A fast CLI tool that automatically lets you generate, manage and study flashcards directly from your local notes, lectures and documents, with the use of AI.
 
 
 ## Features
+
+---
 
 - **Multiple Format Support:** Extracts text from .txt, .md, .pdf, .docx, .pptx, .png and .jpg.
 - **Flashcard Generation:** Uses Llama 3 via Groq to extract strict definitions and concepts.
@@ -12,6 +16,8 @@ A fast CLI tool that automatically lets you generate, manage and study flashcard
 
 
 ## Installation
+
+---
 
 ### Prerequisites
 
@@ -37,6 +43,8 @@ It will prompt for the Groq API key and ask if you want to install flearn global
 
 ## Usage
 
+---
+
 Flash-learner organizes flashcards into groups. Group name is set autmatically to the name of the folder containing the source files.
 
 ```
@@ -60,6 +68,8 @@ commands:
 ```
 
 ## Commands
+
+---
 
 ### gen
 `flearn gen path/to/notes`
@@ -92,5 +102,7 @@ Shows the entire Q&A list for a given group
 Goes over flashcards of a given group one by one.
 
 ## Debugging
+
+---
 
 Appending the `--debug` flag to any command shows exactly what the app is doing under the hood.
